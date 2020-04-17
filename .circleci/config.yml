@@ -1,0 +1,160 @@
+version: 2.1
+commands:
+  npm-install:
+    steps:
+      - run:
+          name: Generate .npmrc
+          command: echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> .npmrc
+      - restore_cache:
+          keys:
+            - cache-npm-{{ checksum "package-lock.json" }}
+      - run: npm install
+      - save_cache:
+          key: cache-npm-{{ checksum "package-lock.json" }}
+          paths:
+            - ./node_modules
+  npm-publish-minor:
+    parameters:
+    steps:
+      - run: apk add openssh
+      - add_ssh_keys
+      - run:
+          name: Publish minor version to npm
+          command: |
+            npm install dot-json --no-save
+
+            git config user.email "timeytim@bigpager.com"
+            git config user.name "timeytim-the-bot"
+
+            # Build
+            git checkout master
+            git checkout package-lock.json # this can change, causing later steps to fail
+
+            # Increment minor version
+            echo "Increment minor version"
+            OLD_VERSION=$(./node_modules/.bin/dot-json package.json version)
+            echo "  OLD_VERSION $OLD_VERSION"
+            npm version minor
+            NEW_VERSION=$(./node_modules/.bin/dot-json package.json version)
+            echo "  NEW_VERSION $NEW_VERSION"
+
+            # Publish to NPM
+            echo "Building minor version $NEW_VERSION"
+            npm run build
+            echo "Publishing minor version $NEW_VERSION to npm"
+            npm publish
+
+            # Push to GitHub
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            git commit --amend -m "v$NEW_VERSION [skip ci]" # Avoid infinite loop
+            git push --tags --set-upstream origin master
+
+  npm-publish-commit:
+    steps:
+      - run: apk add openssh
+      - add_ssh_keys
+      - run:
+          name: Publish commit to npm
+          command: |
+            npm install dot-json --no-save
+
+            # Add the PR number + commit as a suffix to the version in package.json
+            OLD_VERSION=$(./node_modules/.bin/dot-json package.json version)
+            PR_NUMBER=${CIRCLE_PULL_REQUEST##*/}
+            NEW_VERSION="$OLD_VERSION-PR-$PR_NUMBER-$(echo $CIRCLE_SHA1 | cut -c -7)"
+            ./node_modules/.bin/dot-json package.json version "$NEW_VERSION"
+
+            # Publish to NPM
+            echo "Building commit version $NEW_VERSION"
+            npm run build
+            echo "Publishing commit version $NEW_VERSION to npm"
+            npm publish
+
+jobs:
+  build:
+    docker:
+      - image: node:10-alpine
+    steps:
+      - run: apk add git
+      - checkout
+      - run:
+          name: Build Package
+          command: echo Building Package
+      # Restore node dependency cache
+      - restore_cache:
+          keys:
+            - cache-npm-{{ checksum "package-lock.json" }}
+      - npm-install
+      - save_cache:
+          key: cache-npm-{{ checksum "package-lock.json" }}
+          paths:
+            - ./node_modules
+      # Remove lint check for now
+      # - run: npm run lint && npm run license-check && npm run build
+  test:
+    docker:
+      - image: node:10-alpine
+    steps:
+      - run: apk add git
+      - checkout
+      - restore_cache:
+          keys:
+            - cache-npm-{{ checksum "package-lock.json" }}
+      - npm-install
+      - save_cache:
+          key: cache-npm-{{ checksum "package-lock.json" }}
+          paths:
+            - ./node_modules
+      - run: npm t
+  publish-minor:
+    docker:
+      - image: node:10-alpine
+        environment:
+          NPM_TOKEN: $NPM_TOKEN
+    steps:
+      - run: apk add git
+      - checkout
+      - npm-install
+      - npm-publish-minor
+  publish-commit:
+    docker:
+      - image: node:10-alpine
+        environment:
+          NPM_TOKEN: $NPM_TOKEN
+    steps:
+      - run: apk add git
+      - checkout
+      - npm-install
+      - npm-publish-commit
+
+# need to set build tags in order to respect publish tags
+# see: https://circleci.com/docs/2.0/workflows/#git-tag-job-execution
+workflows:
+  main:
+    jobs:
+      - build:
+          filters:
+            tags:
+              ignore: /^v.*/
+      - test:
+          filters:
+            tags:
+              ignore: /^v.*/
+          requires:
+            - build
+      - publish-minor:
+          filters:
+            tags:
+              ignore: /^v.*/
+            branches:
+              only: master
+          requires:
+            - test
+#      - publish-commit:
+#          filters:
+#            tags:
+#              only: /.*/
+#            branches:
+#              ignore: master
+#          requires:
+#            - test
