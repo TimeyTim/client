@@ -80,3 +80,4 @@ cypress/videos
 junit*
 junit/*
 .idea
+.npmrc
